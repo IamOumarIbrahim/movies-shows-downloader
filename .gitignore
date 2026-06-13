@@ -6,3 +6,4 @@ dist/
 *.spec
 .gemini/
 staging/
+*.exe

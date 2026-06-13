@@ -192,6 +192,18 @@ def search_movies(query):
         elif size_mb > 3500:
             score -= 200
             
+        # Penalize x265, h265, hevc, av1, 10bit (incompatible video codecs on native iPad player)
+        if any(codec in name_lower for codec in ['x265', 'h265', 'hevc', 'av1', '10bit', '10-bit']):
+            score -= 500
+            
+        # Prefer x264/h264
+        if any(codec in name_lower for codec in ['x264', 'h264', 'h.264']):
+            score += 150
+            
+        # Prefer mp4 container
+        if 'mp4' in name_lower:
+            score += 50
+            
         m['score'] = score
             
     # Sort by score descending, then by seeders descending
@@ -275,6 +287,18 @@ def find_best_episode_torrent(show_name, season, episode):
             score += 150
         elif size_mb > 1000:
             score -= 200
+            
+        # Penalize x265, h265, hevc, av1, 10bit (incompatible video codecs on native iPad player)
+        if any(codec in name_lower for codec in ['x265', 'h265', 'hevc', 'av1', '10bit', '10-bit']):
+            score -= 500
+            
+        # Prefer x264/h264
+        if any(codec in name_lower for codec in ['x264', 'h264', 'h.264']):
+            score += 150
+            
+        # Prefer mp4 container
+        if 'mp4' in name_lower:
+            score += 50
             
         t['score'] = score
         
