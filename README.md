@@ -27,7 +27,7 @@ A Python desktop application with a modern, dark-themed GUI (built using `custom
 ## 🚀 Direct Download
 
 You can download the compiled standalone Windows installer directly here:
-👉 **[Download MoviesAndShowsInstaller.exe (24.4 MB)](https://github.com/IamOumarIbrahim/MoviesAndShowsInstaller/raw/master/MoviesAndShowsInstaller.exe)**
+👉 **[Download MoviesAndShowsInstaller.exe (24.4 MB)](https://github.com/IamOumarIbrahim/movies-shows-downloader/raw/master/MoviesAndShowsInstaller.exe)**
 
 ---
 
@@ -99,8 +99,8 @@ graph TD
 
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/IamOumarIbrahim/MoviesAndShowsInstaller.git
-   cd MoviesAndShowsInstaller
+   git clone https://github.com/IamOumarIbrahim/movies-shows-downloader.git
+   cd movies-shows-downloader
    ```
 
 2. **Install Dependencies**:
