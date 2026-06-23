@@ -66,7 +66,13 @@ LOCK_PATH = os.path.join(QUEUE_DIR, 'downloadcc.lock')
 def init_queue_dir():
     os.makedirs(QUEUE_DIR, exist_ok=True)
     if not os.path.exists(QUEUE_PATH):
-        save_queue({"queue": []})
+        try:
+            temp_path = QUEUE_PATH + ".tmp"
+            with open(temp_path, 'w') as f:
+                json.dump({"queue": []}, f, indent=2)
+            os.replace(temp_path, QUEUE_PATH)
+        except Exception as e:
+            print(f"Error initializing queue file: {e}")
 
 def load_queue():
     init_queue_dir()
