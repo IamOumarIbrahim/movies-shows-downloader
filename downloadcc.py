@@ -5,7 +5,10 @@ import time
 import shutil
 import ctypes
 import urllib.parse
+import json
+import tempfile
 import libtorrent as lt
+import search_engine
 
 # Enable Windows Console Virtual Terminal Processing for ANSI colors
 try:
@@ -14,15 +17,81 @@ try:
 except Exception:
     pass
 
-# Import search_engine from current directory
-import search_engine
-
 # Determine default output directory
 WORKSPACE_DIR = r"d:\Downloads\Videos"
 if not os.path.exists(WORKSPACE_DIR):
     WORKSPACE_DIR = os.path.join(os.path.expanduser('~'), 'Downloads')
 
-VERSION = "2.2"
+VERSION = "2.3"
+
+# Queue Paths
+QUEUE_DIR = os.path.join(os.path.expanduser('~'), '.downloadcc')
+QUEUE_PATH = os.path.join(QUEUE_DIR, 'queue.json')
+LOCK_PATH = os.path.join(QUEUE_DIR, 'downloadcc.lock')
+
+def init_queue_dir():
+    os.makedirs(QUEUE_DIR, exist_ok=True)
+    if not os.path.exists(QUEUE_PATH):
+        save_queue({"queue": []})
+
+def load_queue():
+    init_queue_dir()
+    try:
+        with open(QUEUE_PATH, 'r') as f:
+            return json.load(f)
+    except:
+        return {"queue": []}
+
+def save_queue(q_data):
+    init_queue_dir()
+    try:
+        temp_path = QUEUE_PATH + ".tmp"
+        with open(temp_path, 'w') as f:
+            json.dump(q_data, f, indent=2)
+        os.replace(temp_path, QUEUE_PATH)
+    except Exception as e:
+        print(f"Error saving queue: {e}")
+
+_lock_file = None
+
+def acquire_lock():
+    global _lock_file
+    init_queue_dir()
+    try:
+        if os.path.exists(LOCK_PATH):
+            try:
+                os.remove(LOCK_PATH)
+            except OSError:
+                return False
+        _lock_file = open(LOCK_PATH, 'w')
+        _lock_file.write(str(os.getpid()))
+        _lock_file.flush()
+        return True
+    except:
+        return False
+
+def release_lock():
+    global _lock_file
+    if _lock_file:
+        try:
+            _lock_file.close()
+            if os.path.exists(LOCK_PATH):
+                os.remove(LOCK_PATH)
+        except:
+            pass
+        _lock_file = None
+
+def is_downloader_running():
+    lock_path = os.path.join(QUEUE_DIR, 'downloadcc.lock')
+    if not os.path.exists(lock_path):
+        return False
+    try:
+        temp_rename_path = lock_path + ".test"
+        os.rename(lock_path, temp_rename_path)
+        os.rename(temp_rename_path, lock_path)
+        return False
+    except OSError:
+        return True
 
 def format_size(bytes_val):
     if bytes_val < 1024:
@@ -58,6 +127,38 @@ def interactive_select(options, prompt):
             print(f"\033[1;31mInvalid choice. Please enter a number between 1 and {len(options)}, or 'c'.\033[0m")
         except ValueError:
             print("\033[1;31mInvalid input. Please enter a valid number or 'c'.\033[0m")
+
+def get_compatibility_badge(item):
+    if item['type'] == 'show':
+        return "", 0
+        
+    name = item['title'].lower()
+    seeders = item['seeders']
+    
+    size_str = item.get('size_gb', '0 GB')
+    try:
+        size_gb = float(size_str.split()[0])
+    except:
+        size_gb = 0.0
+        
+    is_x265 = any(codec in name for codec in ['x265', 'h265', 'hevc', 'av1', '10bit', '10-bit'])
+    is_h264 = any(codec in name for codec in ['x264', 'h264', 'h.264', 'mp4'])
+    
+    if seeders < 3:
+        return "\033[1;30m[Slow - Low Seeds]\033[0m", 4
+    elif is_x265:
+        return "\033[1;36m[Requires VLC (x265)]\033[0m", 3
+    elif is_h264:
+        if size_gb < 1.0:
+            return "\033[1;33m[Compatible - Low Quality]\033[0m", 2
+        elif size_gb > 9.0:
+            return "\033[1;33m[Compatible - Large File]\033[0m", 2
+        else:
+            return "\033[1;32m[Best iPad Compatibility]\033[0m", 1
+    else:
+        if size_gb > 0:
+            return "\033[1;37m[Compatible - Unknown Codec]\033[0m", 2
+        return "", 2
 
 def search_season_pack(show_title, season_num=None, max_season=None):
     if season_num is None:
@@ -173,7 +274,7 @@ def search_season_pack(show_title, season_num=None, max_season=None):
     valid_torrents.sort(key=lambda x: (x['score'], x['seeders']), reverse=True)
     return valid_torrents[0]
 
-def download_torrent(info_hash, torrent_name, target_dir, staging_dir):
+def download_torrent(info_hash, torrent_name, target_dir, staging_dir, item_idx=-1):
     os.makedirs(staging_dir, exist_ok=True)
     ses = lt.session({
         'listen_interfaces': '0.0.0.0:6881',
@@ -199,9 +300,20 @@ def download_torrent(info_hash, torrent_name, target_dir, staging_dir):
     print(f"\n\033[1;34m[*] Connecting to peers and fetching metadata...\033[0m")
     handle = ses.add_torrent(params)
     
+    meta_start = time.time()
     while not handle.has_metadata():
         s = handle.status()
         print(f"\rPeers: {s.num_peers} | State: fetching metadata...", end="", flush=True)
+        if item_idx != -1 and time.time() - meta_start >= 1.5:
+            q_data = load_queue()
+            if item_idx < len(q_data['queue']):
+                q_data['queue'][item_idx]['peers'] = s.num_peers
+                q_data['queue'][item_idx]['eta'] = "Fetching Metadata"
+                save_queue(q_data)
+        if time.time() - meta_start > 60:
+            print("\n\033[1;31m[!] Metadata fetch timed out (no seeders). Skipping...\033[0m")
+            ses.remove_torrent(handle)
+            return False
         time.sleep(1)
         
     tor_info = handle.get_torrent_info()
@@ -209,23 +321,67 @@ def download_torrent(info_hash, torrent_name, target_dir, staging_dir):
     print(f"\n\033[1;32m[+] Connected! Downloading: {tor_info.name()} ({format_size(total_size)})\033[0m")
     
     last_print = 0
+    stuck_start = None
     try:
         while True:
             s = handle.status()
             progress = s.progress * 100
             speed = s.download_rate / (1024 * 1024)
             peers = s.num_peers
+            done = s.total_done
             
+            # ETA Calculation
+            remaining_bytes = total_size - done
+            if s.download_rate > 0:
+                eta_sec = remaining_bytes / s.download_rate
+                hours = int(eta_sec // 3600)
+                minutes = int((eta_sec % 3600) // 60)
+                seconds = int(eta_sec % 60)
+                if hours > 0:
+                    eta_str = f"{hours}h {minutes}m {seconds}s"
+                elif minutes > 0:
+                    eta_str = f"{minutes}m {seconds}s"
+                else:
+                    eta_str = f"{seconds}s"
+            else:
+                eta_str = "Unknown"
+                
+            # Self healing (0 speed for 60s)
+            if s.state == lt.torrent_status.downloading and speed == 0:
+                if stuck_start is None:
+                    stuck_start = time.time()
+                elif time.time() - stuck_start > 60:
+                    print("\n\033[1;31m[!] Download stuck with 0 speed for 60 seconds. Skipping...\033[0m")
+                    ses.remove_torrent(handle)
+                    return False
+            else:
+                stuck_start = None
+                
             if time.time() - last_print >= 1.5:
-                print(f"\rProgress: {progress:.2f}% | Speed: {speed:.2f} MB/s | Peers: {peers} | Done: {format_size(s.total_done)}", end="", flush=True)
+                print(f"\rProgress: {progress:.2f}% | Speed: {speed:.2f} MB/s | Peers: {peers} | Done: {format_size(done)} | ETA: {eta_str}", end="", flush=True)
                 last_print = time.time()
                 
+                # Write to queue file
+                if item_idx != -1:
+                    q_data = load_queue()
+                    if item_idx < len(q_data['queue']):
+                        q_data['queue'][item_idx]['progress'] = progress
+                        q_data['queue'][item_idx]['speed_mb'] = speed
+                        q_data['queue'][item_idx]['peers'] = peers
+                        q_data['queue'][item_idx]['eta'] = eta_str
+                        save_queue(q_data)
+                        
             if s.state == lt.torrent_status.seeding or progress >= 100.0:
                 print("\n\033[1;32m[+] Download finished!\033[0m")
                 break
             time.sleep(0.5)
     except KeyboardInterrupt:
         print("\n\033[1;31m[!] Download paused/cancelled.\033[0m")
+        if item_idx != -1:
+            q_data = load_queue()
+            if item_idx < len(q_data['queue']):
+                q_data['queue'][item_idx]['status'] = 'queued'
+                save_queue(q_data)
         ses.remove_torrent(handle)
         return False
         
@@ -281,58 +437,91 @@ def prompt_output_path():
     print(f"\033[1;30m(Press Enter to use default: {WORKSPACE_DIR})\033[0m")
     user_path = input("Path: ").strip()
     if user_path:
-        # Expand environment variables or ~ paths
         expanded = os.path.abspath(os.path.expanduser(user_path))
         print(f"\033[32m[+] Target directory set to: {expanded}\033[0m")
         return expanded
     return WORKSPACE_DIR
 
-def get_compatibility_badge(item):
-    if item['type'] == 'show':
-        return "", 0
-        
-    name = item['title'].lower()
-    seeders = item['seeders']
+def show_queue():
+    q_data = load_queue()
+    queue_list = q_data.get('queue', [])
     
-    # Extract size in GB
-    size_str = item.get('size_gb', '0 GB')
-    try:
-        size_gb = float(size_str.split()[0])
-    except:
-        size_gb = 0.0
-        
-    is_x265 = any(codec in name for codec in ['x265', 'h265', 'hevc', 'av1', '10bit', '10-bit'])
-    is_h264 = any(codec in name for codec in ['x264', 'h264', 'h.264', 'mp4'])
-    
-    if seeders < 3:
-        return "\033[1;30m[Slow - Low Seeds]\033[0m", 4
-    elif is_x265:
-        return "\033[1;36m[Requires VLC (x265)]\033[0m", 3
-    elif is_h264:
-        if size_gb < 1.0:
-            return "\033[1;33m[Compatible - Low Quality]\033[0m", 2
-        elif size_gb > 9.0:
-            return "\033[1;33m[Compatible - Large File]\033[0m", 2
-        else:
-            return "\033[1;32m[Best iPad Compatibility]\033[0m", 1
-    else:
-        if size_gb > 0:
-            return "\033[1;37m[Compatible - Unknown Codec]\033[0m", 2
-        return "", 2
-
-def main():
-    print(f"\033[1;35mMovies & Shows CLI Downloader (v{VERSION})\033[0m")
-    print("\033[1;30m" + "=" * 40 + "\033[0m")
-    
-    if len(sys.argv) < 2:
-        query = input("\033[1;35mEnter the movie or TV show name to search: \033[0m").strip()
-    else:
-        query = " ".join(sys.argv[1:])
-        
-    if not query:
-        print("\033[1;31mError: No search query provided.\033[0m")
+    if not queue_list:
+        print("\033[1;33mThe download queue is currently empty.\033[0m")
         return
         
+    print(f"\n\033[1;35mActive Download Queue\033[0m")
+    print("\033[1;30m" + "=" * 30 + "\033[0m")
+    
+    for idx, item in enumerate(queue_list, 1):
+        status = item.get('status', 'queued')
+        title = item.get('title', 'Unknown')
+        torrent_name = item.get('torrent_name', 'Unknown')
+        
+        status_colors = {
+            'queued': '\033[1;33m[Queued]\033[0m',
+            'downloading': '\033[1;32m[Downloading]\033[0m',
+            'completed': '\033[1;30m[Completed]\033[0m',
+            'failed': '\033[1;31m[Failed]\033[0m'
+        }
+        status_str = status_colors.get(status, f"[{status}]")
+        
+        if status == 'downloading':
+            progress = item.get('progress', 0.0)
+            speed = item.get('speed_mb', 0.0)
+            peers = item.get('peers', 0)
+            eta = item.get('eta', 'Unknown')
+            print(f"  \033[1;36m[{idx}]\033[0m {title} - {status_str}")
+            print(f"      Progress: {progress:.2f}% | Speed: {speed:.2f} MB/s | Peers: {peers} | ETA: {eta}")
+            print(f"      File: {torrent_name}")
+        else:
+            print(f"  \033[1;36m[{idx}]\033[0m {title} - {status_str}")
+            print(f"      File: {torrent_name}")
+
+def clear_queue():
+    q_data = load_queue()
+    q_data['queue'] = []
+    save_queue(q_data)
+    print("\033[1;32m[+] Download queue cleared successfully.\033[0m")
+
+def remove_queue_item(val):
+    q_data = load_queue()
+    queue_list = q_data.get('queue', [])
+    
+    if not queue_list:
+        print("\033[1;31mError: Queue is empty.\033[0m")
+        return
+        
+    try:
+        idx = int(val) - 1
+        if 0 <= idx < len(queue_list):
+            removed = queue_list.pop(idx)
+            q_data['queue'] = queue_list
+            save_queue(q_data)
+            print(f"\033[1;32m[+] Removed '{removed['title']}' from the queue.\033[0m")
+            return
+    except ValueError:
+        pass
+        
+    matched = []
+    for item in queue_list:
+        if val.lower() in item['title'].lower():
+            matched.append(item)
+            
+    if not matched:
+        print(f"\033[1;31mError: Item '{val}' not found in queue.\033[0m")
+    elif len(matched) == 1:
+        queue_list.remove(matched[0])
+        q_data['queue'] = queue_list
+        save_queue(q_data)
+        print(f"\033[1;32m[+] Removed '{matched[0]['title']}' from the queue.\033[0m")
+    else:
+        print("\033[1;33mMultiple matches found. Please specify by item number:\033[0m")
+        for idx, item in enumerate(queue_list, 1):
+            if val.lower() in item['title'].lower():
+                print(f"  [{idx}] {item['title']}")
+
+def add_item_to_queue(query):
     print(f"\033[1;34m[*] Searching for '{query}'...\033[0m")
     
     results = []
@@ -367,7 +556,7 @@ def main():
         print("\033[1;31mNo matching shows or movies found.\033[0m")
         return
         
-    # Sort results based on compatibility tier (Tier 0 -> Tier 1 -> Tier 2 -> Tier 3 -> Tier 4)
+    # Sort results based on compatibility tier
     results.sort(key=lambda x: x.get('tier', 2))
     
     selection = interactive_select(results, f"Search Results for '{query}'")
@@ -375,9 +564,19 @@ def main():
         print("\033[1;31mCancelled.\033[0m")
         return
         
+    new_item = {
+        "id": str(int(time.time())),
+        "type": selection['type'],
+        "title": selection['title'],
+        "status": "queued",
+        "progress": 0.0,
+        "speed_mb": 0.0,
+        "peers": 0,
+        "eta": "Unknown"
+    }
+    
     # Process Selection
     if selection['type'] == 'show':
-        # TV Show Selected - Ask for Season
         show_title = selection['title']
         show_id = selection['id']
         
@@ -398,68 +597,186 @@ def main():
             return
             
         target_season = season_sel['val']
+        new_item["target_season"] = target_season
+        new_item["max_season"] = seasons[-1] if seasons else None
+        new_item["imdb_id"] = selection.get('imdb_id', '')
         
-        # Prompt for target path
         dest_workspace = prompt_output_path()
+        new_item["dest_workspace"] = dest_workspace
         
         # Search Season Pack
         print(f"\033[1;34m[*] Searching for season/series pack on APIBay...\033[0m")
-        torrent_pack = search_season_pack(show_title, target_season, max_season=seasons[-1] if seasons else None)
+        torrent_pack = search_season_pack(show_title, target_season, max_season=new_item["max_season"])
+        
+        show_folder_name = show_title
+        if target_season is not None:
+            show_folder_name = f"{show_title} - Season {target_season:02d}"
+        show_folder_name = re.sub(r'[\\/*?:"<>|]', "", show_folder_name)
+        
+        dest_dir = os.path.join(dest_workspace, show_folder_name)
+        new_item["dest_dir"] = dest_dir
         
         if torrent_pack:
-            # We found a pack!
-            show_folder_name = show_title
-            if target_season is not None:
-                show_folder_name = f"{show_title} - Season {target_season:02d}"
-                
-            show_folder_name = re.sub(r'[\\/*?:"<>|]', "", show_folder_name)
-            dest_dir = os.path.join(dest_workspace, show_folder_name)
-            staging_dir = os.path.join(dest_workspace, "staging_temp_" + str(int(time.time())))
-            
-            success = download_torrent(torrent_pack['info_hash'], torrent_pack['name'], dest_dir, staging_dir)
-            if success:
-                post_process_files(staging_dir, dest_dir, is_movie=False)
+            new_item["torrent_name"] = torrent_pack['name']
+            new_item["info_hash"] = torrent_pack['info_hash']
+            new_item["staging_dir"] = os.path.join(dest_workspace, "staging_temp_" + new_item["id"])
         else:
             # Fallback to individual episodes
-            print("\033[1;33m[!] No complete season pack found. Downloading individual episodes sequentially...\033[0m")
             target_eps = [ep for ep in episodes if target_season is None or ep['season'] == target_season]
+            new_item["episodes"] = target_eps
+            new_item["torrent_name"] = f"{show_title} (Individual Episodes)"
+            new_item["info_hash"] = "fallback"
             
-            show_folder_name = show_title
-            if target_season is not None:
-                show_folder_name = f"{show_title} - Season {target_season:02d}"
-            show_folder_name = re.sub(r'[\\/*?:"<>|]', "", show_folder_name)
-            dest_dir = os.path.join(dest_workspace, show_folder_name)
-            
-            print(f"[*] Queueing {len(target_eps)} episodes...")
-            for idx, ep in enumerate(target_eps, 1):
-                ep_num = ep['number']
-                ep_season = ep['season']
-                print(f"\n\033[1;34m[*] [{idx}/{len(target_eps)}] Searching for S{ep_season:02d}E{ep_num:02d}...\033[0m")
-                ep_torrent = search_engine.find_best_episode_torrent(show_title, ep_season, ep_num, imdb_id=selection['imdb_id'])
-                
-                if ep_torrent:
-                    staging_dir = os.path.join(dest_workspace, f"staging_temp_ep_{ep_season:02d}_{ep_num:02d}")
-                    success = download_torrent(ep_torrent['info_hash'], ep_torrent['name'], dest_dir, staging_dir)
-                    if success:
-                        post_process_files(staging_dir, dest_dir, is_movie=False)
-                else:
-                    print(f"\033[1;31m[!] Episode S{ep_season:02d}E{ep_num:02d} not found on trackers.\033[0m")
-                    
-    elif selection['type'] == 'movie':
+    else:
         # Movie Selected
         movie_title = selection['title']
         info_hash = selection['info_hash']
         
-        # Prompt for target path
         dest_workspace = prompt_output_path()
+        new_item["dest_workspace"] = dest_workspace
         
         movie_folder_name = re.sub(r'[\\/*?:"<>|]', "", movie_title)
         dest_dir = os.path.join(dest_workspace, movie_folder_name)
-        staging_dir = os.path.join(dest_workspace, "staging_temp_" + str(int(time.time())))
+        new_item["dest_dir"] = dest_dir
+        new_item["torrent_name"] = movie_title
+        new_item["info_hash"] = info_hash
+        new_item["is_movie"] = True
+        new_item["staging_dir"] = os.path.join(dest_workspace, "staging_temp_" + new_item["id"])
         
-        success = download_torrent(info_hash, movie_title, dest_dir, staging_dir)
+    # Append to queue
+    q_data = load_queue()
+    q_data['queue'].append(new_item)
+    save_queue(q_data)
+    
+    print(f"\033[1;32m[+] Added '{new_item['title']}' to download queue.\033[0m")
+    
+    if is_downloader_running():
+        print("\033[1;33m[*] A download process is already running in the background. Your item will be downloaded sequentially.\033[0m")
+    else:
+        print("\033[1;32m[*] Queue is idle. Starting downloads now...\033[0m")
+        process_queue_loop()
+
+def process_queue_loop():
+    if not acquire_lock():
+        return
+        
+    try:
+        while True:
+            q_data = load_queue()
+            active_item = None
+            active_idx = -1
+            
+            for idx, item in enumerate(q_data.get('queue', [])):
+                if item['status'] in ['queued', 'downloading']:
+                    active_item = item
+                    active_idx = idx
+                    break
+                    
+            if not active_item:
+                break
+                
+            success = download_queue_item(active_item, active_idx)
+            
+            # Update status
+            q_data = load_queue()
+            if active_idx < len(q_data['queue']):
+                q_data['queue'][active_idx]['status'] = 'completed' if success else 'failed'
+                save_queue(q_data)
+    finally:
+        release_lock()
+
+def download_queue_item(item, item_idx):
+    q_data = load_queue()
+    if item_idx < len(q_data['queue']):
+        q_data['queue'][item_idx]['status'] = 'downloading'
+        save_queue(q_data)
+        
+    dest_dir = item['dest_dir']
+    is_movie = item.get('is_movie', False)
+    
+    episodes = item.get('episodes', [])
+    if episodes:
+        print(f"\n\033[1;34m[*] Processing show: {item['title']} ({len(episodes)} episodes sequentially)\033[0m")
+        all_success = True
+        
+        for idx, ep in enumerate(episodes, 1):
+            ep_season = ep['season']
+            ep_num = ep['number']
+            
+            # Self healing: check if episode file already exists
+            already_done = False
+            for ext in ['.mp4', '.mkv', '.avi', '.m4v', '.mov']:
+                if os.path.exists(os.path.join(dest_dir, f"S_{ep_season:02d}_E_{ep_num:02d}{ext}")):
+                    already_done = True
+                    break
+            if already_done:
+                print(f"  -> Episode S{ep_season:02d}E{ep_num:02d} already completed. Skipping.")
+                continue
+                
+            print(f"\n\033[1;34m[*] [{idx}/{len(episodes)}] Searching for S{ep_season:02d}E{ep_num:02d}...\033[0m")
+            ep_torrent = search_engine.find_best_episode_torrent(item['title'], ep_season, ep_num, imdb_id=item.get('imdb_id'))
+            
+            if ep_torrent:
+                staging_ep = os.path.join(item['dest_workspace'], f"staging_temp_ep_{ep_season:02d}_{ep_num:02d}")
+                success = download_torrent(ep_torrent['info_hash'], ep_torrent['name'], dest_dir, staging_ep, item_idx=item_idx)
+                if success:
+                    post_process_files(staging_ep, dest_dir, is_movie=False)
+                else:
+                    all_success = False
+            else:
+                print(f"\033[1;31m[!] Episode S{ep_season:02d}E{ep_num:02d} not found on trackers.\033[0m")
+                all_success = False
+        return all_success
+        
+    else:
+        info_hash = item['info_hash']
+        torrent_name = item['torrent_name']
+        staging_dir = item['staging_dir']
+        success = download_torrent(info_hash, torrent_name, dest_dir, staging_dir, item_idx=item_idx)
         if success:
-            post_process_files(staging_dir, dest_dir, is_movie=True)
+            post_process_files(staging_dir, dest_dir, is_movie=is_movie)
+        return success
+
+def main():
+    init_queue_dir()
+    
+    args = sys.argv[1:]
+    
+    if len(args) > 0:
+        cmd = args[0].lower()
+        if cmd == 'queue':
+            show_queue()
+            return
+        elif cmd == 'clear':
+            clear_queue()
+            return
+        elif cmd == 'remove':
+            if len(args) < 2:
+                print("\033[1;31mError: Please specify the item number to remove.\033[0m")
+                print("Usage: downloadcc remove <number>")
+                return
+            remove_queue_item(args[1])
+            return
+        elif cmd == 'add':
+            if len(args) < 2:
+                print("\033[1;31mError: Please specify the movie or TV show name to add.\033[0m")
+                print("Usage: downloadcc add \"Name\"")
+                return
+            query = " ".join(args[1:])
+            add_item_to_queue(query)
+            return
+            
+    # Default behavior: run search and interactive selection
+    if len(args) == 0:
+        query = input("\033[1;35mEnter the movie or TV show name to search: \033[0m").strip()
+    else:
+        query = " ".join(args)
+        
+    if not query:
+        print("\033[1;31mError: No search query provided.\033[0m")
+        return
+        
+    add_item_to_queue(query)
 
 if __name__ == "__main__":
     main()

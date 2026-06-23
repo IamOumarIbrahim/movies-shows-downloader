@@ -71,20 +71,31 @@ You can download the compiled standalone Windows installer directly here:
 
 ## 🏃 How to Use
 
-Simply launch `downloadcc` with or without a query:
+### Basic Commands
 
-```bash
-downloadcc "Mr. Robot"
-```
+You can run `downloadcc` globally from any terminal session.
 
-1. **Interactive Search**: The CLI will search for matching titles and display a selection menu.
-2. **Keyboard Controls**:
-   - `Up/Down Arrow Keys`: Change selection highlight.
-   - `Enter`: Confirm selection.
-   - `Esc`: Cancel search.
-3. **Select Season**: If you chose a TV Series, select a specific season (or choose **All Seasons (Complete Pack)**).
-4. **Choose Save Directory**: Input the absolute path where you want the downloads saved (or press Enter to use default).
-5. **Real-time Download**: Displays progress percentage, active transfer speed (MB/s), and active peer count.
+* **Search and Add**: Launch with or without a query to search and select media:
+  ```bash
+  downloadcc "Mr. Robot"
+  ```
+  1. **Numbered Selection**: Search results are classified and sorted by compatibility. Type the number `[1]`, `[2]`, etc. of the option you want and press **Enter** (or type `c` to cancel).
+  2. **Select Season**: If a TV Show is selected, select a specific season (or choose **All Seasons (Complete Pack)**) using the same numbered prompt.
+  3. **Choose Save Directory**: Input the absolute path where you want the files saved (or press Enter to use default).
+  4. **Active Downloads**: Real-time progress percentage, speed (MB/s), active peer count, and dynamic **ETA** calculations are displayed.
+
+* **Manage the Download Queue**:
+  - **`downloadcc queue`**: Lists the actively downloading item (with speed, peers, progress, and ETA) and all pending items in the queue.
+  - **`downloadcc add "Name"`**: Searches, selects, and appends a new item directly to the queue. If the downloader is idle, it starts downloading immediately. If it's busy, it queues it to start automatically once current downloads finish.
+  - **`downloadcc remove <number>`**: Removes a pending item from the queue list by its queue index number.
+  - **`downloadcc clear`**: Clears all pending items from the queue.
+
+---
+
+## ⚡ Resuming & Self-Healing
+
+* **Auto-Resuming**: If a download is closed or interrupted, running `downloadcc` will automatically check your staging folder, verify the existing pieces, and resume the download exactly where it left off.
+* **Self-Healing**: If a torrent fails to connect, has metadata timeout (> 60 seconds), or download speed remains at `0` for over 60 seconds, the loop will automatically try the next candidate torrents, or skip to the next item in the queue.
 
 ---
 
