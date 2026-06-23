@@ -97,8 +97,7 @@ def query_api(url, headers=None):
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=25) as response:
             return json.loads(response.read().decode('utf-8'))
-    except Exception as e:
-        print(f"Error querying URL {url}: {e}")
+    except Exception:
         return None
 
 def search_tv_shows(query):
@@ -233,27 +232,25 @@ def search_movies(query):
     url = f"https://apibay.org/q.php?q={urllib.parse.quote(query)}"
     results = query_api(url)
     if not results or not isinstance(results, list) or (len(results) == 1 and results[0].get('id') == '0'):
-        print("APIBay search failed or empty, trying fallback proxies...")
         results = search_via_proxies(query)
         
     # Fallback to YTS & SolidTorrents if results are empty or low
     if not results or not isinstance(results, list) or len(results) < 3 or (len(results) == 1 and results[0].get('id') == '0'):
-        print("Low results on APIBay, querying YTS and SolidTorrents fallbacks...")
         fallback_results = []
         
         try:
             yts_res = search_yts(query)
             if yts_res:
                 fallback_results.extend(yts_res)
-        except Exception as e:
-            print(f"YTS fallback failed: {e}")
+        except Exception:
+            pass
             
         try:
             solid_res = search_solidtorrents(query)
             if solid_res:
                 fallback_results.extend(solid_res)
-        except Exception as e:
-            print(f"SolidTorrents fallback failed: {e}")
+        except Exception:
+            pass
             
         if fallback_results:
             if not results or (len(results) == 1 and results[0].get('id') == '0'):
@@ -348,12 +345,10 @@ def find_best_episode_torrent(show_name, season, episode, all_candidates=False, 
         
         results = query_api(url)
         if not results or not isinstance(results, list) or (len(results) == 1 and results[0].get('id') == '0'):
-            print("APIBay episode query failed or empty, trying fallback proxies...")
             results = search_via_proxies(query)
             
         # Fallback to SolidTorrents if results are empty or low
         if not results or not isinstance(results, list) or len(results) < 3 or (len(results) == 1 and results[0].get('id') == '0'):
-            print("Low results on APIBay, trying SolidTorrents fallback...")
             try:
                 solid_res = search_solidtorrents(query)
                 if solid_res:
@@ -361,8 +356,8 @@ def find_best_episode_torrent(show_name, season, episode, all_candidates=False, 
                         results = solid_res
                     else:
                         results.extend(solid_res)
-            except Exception as e:
-                print(f"SolidTorrents fallback failed: {e}")
+            except Exception:
+                pass
             
         if results and isinstance(results, list) and not (len(results) == 1 and results[0].get('id') == '0'):
             # Pattern to match current season and episode
@@ -487,8 +482,7 @@ def search_archive_org(query):
                 'downloads': doc.get('downloads', 0)
             })
         return results
-    except Exception as e:
-        print(f"Error searching Archive.org: {e}")
+    except Exception:
         return []
 
 def parse_tpb_html(html_content):
@@ -594,17 +588,14 @@ def search_via_proxies(query_str):
     
     for proxy_template in proxies:
         url = proxy_template.format(query=encoded_query)
-        print(f"Trying fallback proxy: {url}")
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=8) as response:
                 html_content = response.read().decode('utf-8')
                 results = parse_tpb_html(html_content)
                 if results:
-                    print(f"Successfully retrieved {len(results)} results from proxy {url}")
                     return results
-        except Exception as e:
-            print(f"Proxy request failed for {url}: {e}")
+        except Exception:
             continue
     return []
 
@@ -619,7 +610,6 @@ def find_torrents_from_eztv(imdb_id, season, episode):
     
     for mirror in mirrors:
         url = f"{mirror}/api/get-torrents?imdb_id={imdb_id}"
-        print(f"Trying EZTV query: {url}")
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as response:
@@ -638,14 +628,12 @@ def find_torrents_from_eztv(imdb_id, season, episode):
                                 'seeders': int(t.get('seeds', 0)),
                                 'leechers': int(t.get('peers', 0)),
                                 'size': int(t.get('size_bytes', 0))
-                            })
+                             })
                     except Exception:
                         continue
                 if matching_torrents:
-                    print(f"Successfully retrieved {len(matching_torrents)} matching torrents from EZTV")
                     return matching_torrents
-        except Exception as e:
-            print(f"EZTV mirror request failed for {url}: {e}")
+        except Exception:
             continue
     return []
 
