@@ -23,7 +23,7 @@ WORKSPACE_DIR = r"d:\Downloads\Videos"
 if not os.path.exists(WORKSPACE_DIR):
     WORKSPACE_DIR = os.path.join(os.path.expanduser('~'), 'Downloads')
 
-VERSION = "2.0"
+VERSION = "2.1"
 
 def format_size(bytes_val):
     if bytes_val < 1024:
@@ -255,6 +255,39 @@ def prompt_output_path():
         return expanded
     return WORKSPACE_DIR
 
+def get_compatibility_badge(item):
+    if item['type'] == 'show':
+        return "", 0
+        
+    name = item['title'].lower()
+    seeders = item['seeders']
+    
+    # Extract size in GB
+    size_str = item.get('size_gb', '0 GB')
+    try:
+        size_gb = float(size_str.split()[0])
+    except:
+        size_gb = 0.0
+        
+    is_x265 = any(codec in name for codec in ['x265', 'h265', 'hevc', 'av1', '10bit', '10-bit'])
+    is_h264 = any(codec in name for codec in ['x264', 'h264', 'h.264', 'mp4'])
+    
+    if seeders < 3:
+        return "\033[1;30m[Slow - Low Seeds]\033[0m", 4
+    elif is_x265:
+        return "\033[1;36m[Requires VLC (x265)]\033[0m", 3
+    elif is_h264:
+        if size_gb < 1.0:
+            return "\033[1;33m[Compatible - Low Quality]\033[0m", 2
+        elif size_gb > 9.0:
+            return "\033[1;33m[Compatible - Large File]\033[0m", 2
+        else:
+            return "\033[1;32m[Best iPad Compatibility]\033[0m", 1
+    else:
+        if size_gb > 0:
+            return "\033[1;37m[Compatible - Unknown Codec]\033[0m", 2
+        return "", 2
+
 def main():
     print(f"\033[1;35mMovies & Shows CLI Downloader (v{VERSION})\033[0m")
     print("\033[1;30m" + "=" * 40 + "\033[0m")
@@ -280,25 +313,31 @@ def main():
             'year': s['year'],
             'id': s['id'],
             'imdb_id': s['imdb_id'],
+            'tier': 0,
             'label': f"[TV Show] {s['title']} ({s['year']})"
         })
         
     # Search Movies
     movies = search_engine.search_movies(query)
     for m in movies:
+        badge, tier = get_compatibility_badge(m)
         results.append({
             'type': 'movie',
             'title': m['title'],
             'info_hash': m['info_hash'],
             'size_gb': m['size_gb'],
             'seeders': m['seeders'],
-            'label': f"[Movie] {m['title']} ({m['size_gb']}, {m['seeders']} seeders)"
+            'tier': tier,
+            'label': f"[Movie] {m['title']} ({m['size_gb']}, {m['seeders']} seeders) {badge}"
         })
         
     if not results:
         print("\033[1;31mNo matching shows or movies found.\033[0m")
         return
         
+    # Sort results based on compatibility tier (Tier 0 -> Tier 1 -> Tier 2 -> Tier 3 -> Tier 4)
+    results.sort(key=lambda x: x.get('tier', 2))
+    
     selection = interactive_select(results, f"Search Results for '{query}'")
     if not selection:
         print("\033[1;31mCancelled.\033[0m")
