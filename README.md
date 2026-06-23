@@ -119,10 +119,19 @@ graph TD
 
 ## 🏃 How to Run
 
-Launch the application directly using python:
+### Option A: Graphical Interface (GUI)
+Launch the dark-themed desktop GUI:
 ```bash
 python app.py
 ```
+
+### Option B: Interactive CLI
+Launch the interactive terminal-based media downloader:
+```bash
+python downloadcc.py "Vampire Diaries"
+```
+* **Controls**: Use the **Up/Down arrow keys** to navigate, **Enter** to select, and **Esc** to cancel.
+* **Auto-naming**: Automatically structures downloaded content to `S_XX_E_YY.mp4` for iPad playback.
 
 ---
 
