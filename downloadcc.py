@@ -10,6 +10,7 @@ import tempfile
 import libtorrent as lt
 import requests
 import search_engine
+import threading
 
 # Enable Windows Console Virtual Terminal Processing for ANSI colors
 try:
@@ -30,7 +31,13 @@ WORKSPACE_DIR = r"d:\Downloads\Videos"
 if not os.path.exists(WORKSPACE_DIR):
     WORKSPACE_DIR = os.path.join(os.path.expanduser('~'), 'Downloads')
 
-VERSION = "3.3"
+VERSION = "3.4"
+
+# Parallel Queue Concurrency Configurations
+MAX_PARALLEL_DOWNLOADS = 3
+global_progress = {}
+global_results = {}
+
 
 
 # Queue Paths
@@ -302,7 +309,30 @@ def search_season_pack(show_title, season_num=None, max_season=None):
     valid_torrents.sort(key=lambda x: (x['score'], x['seeders']), reverse=True)
     return valid_torrents[0]
 
-def download_torrent(info_hash, torrent_name, target_dir, staging_dir, item_idx=-1):
+def log_status(item_id, msg, progress=None, speed=None, peers=None, eta=None):
+    if item_id:
+        if item_id not in global_progress:
+            global_progress[item_id] = {}
+        if msg:
+            global_progress[item_id]['status_msg'] = msg
+        if progress is not None:
+            global_progress[item_id]['progress'] = progress
+        if speed is not None:
+            global_progress[item_id]['speed_mb'] = speed
+        if peers is not None:
+            global_progress[item_id]['peers'] = peers
+        if eta is not None:
+            global_progress[item_id]['eta'] = eta
+    else:
+        if msg and progress is None:
+            print(msg)
+        elif progress is not None:
+            speed_str = f"| Speed: {speed:.2f} MB/s " if speed is not None else ""
+            peers_str = f"| Peers: {peers} " if peers is not None else ""
+            eta_str = f"| ETA: {eta}" if eta is not None else ""
+            print(f"\rProgress: {progress:.2f}% {speed_str}{peers_str}{eta_str}", end="", flush=True)
+
+def download_torrent(info_hash, torrent_name, target_dir, staging_dir, item_id=None):
     os.makedirs(staging_dir, exist_ok=True)
     ses = lt.session({
         'listen_interfaces': '0.0.0.0:6881',
@@ -325,28 +355,30 @@ def download_torrent(info_hash, torrent_name, target_dir, staging_dir, item_idx=
     params = lt.parse_magnet_uri(magnet_link)
     params.save_path = staging_dir
     
-    print(f"\n\033[1;34m[*] Connecting to peers and fetching metadata...\033[0m")
+    if not item_id:
+        print(f"\n\033[1;34m[*] Connecting to peers and fetching metadata...\033[0m")
+    log_status(item_id, "Connecting to peers")
     handle = ses.add_torrent(params)
     
     meta_start = time.time()
     while not handle.has_metadata():
         s = handle.status()
-        print(f"\rPeers: {s.num_peers} | State: fetching metadata...", end="", flush=True)
-        if item_idx != -1 and time.time() - meta_start >= 1.5:
-            q_data = load_queue()
-            if item_idx < len(q_data['queue']):
-                q_data['queue'][item_idx]['peers'] = s.num_peers
-                q_data['queue'][item_idx]['eta'] = "Fetching Metadata"
-                save_queue(q_data)
+        if not item_id:
+            print(f"\rPeers: {s.num_peers} | State: fetching metadata...", end="", flush=True)
+        log_status(item_id, "Fetching metadata", peers=s.num_peers, eta="Fetching Metadata")
         if time.time() - meta_start > 60:
-            print("\n\033[1;31m[!] Metadata fetch timed out (no seeders). Skipping...\033[0m")
+            if not item_id:
+                print("\n\033[1;31m[!] Metadata fetch timed out (no seeders). Skipping...\033[0m")
+            log_status(item_id, "Metadata Timeout")
             ses.remove_torrent(handle)
             return False
         time.sleep(1)
         
     tor_info = handle.get_torrent_info()
     total_size = tor_info.total_size()
-    print(f"\n\033[1;32m[+] Connected! Downloading: {tor_info.name()} ({format_size(total_size)})\033[0m")
+    if not item_id:
+        print(f"\n\033[1;32m[+] Connected! Downloading: {tor_info.name()} ({format_size(total_size)})\033[0m")
+    log_status(item_id, "Downloading", progress=0.0, speed=0.0, peers=0, eta="Unknown")
     
     last_print = 0
     stuck_start = None
@@ -379,37 +411,30 @@ def download_torrent(info_hash, torrent_name, target_dir, staging_dir, item_idx=
                 if stuck_start is None:
                     stuck_start = time.time()
                 elif time.time() - stuck_start > 60:
-                    print("\n\033[1;31m[!] Download stuck with 0 speed for 60 seconds. Skipping...\033[0m")
+                    if not item_id:
+                        print("\n\033[1;31m[!] Download stuck with 0 speed for 60 seconds. Skipping...\033[0m")
+                    log_status(item_id, "Stuck 0 Speed")
                     ses.remove_torrent(handle)
                     return False
             else:
                 stuck_start = None
                 
             if time.time() - last_print >= 1.5:
-                print(f"\rProgress: {progress:.2f}% | Speed: {speed:.2f} MB/s | Peers: {peers} | Done: {format_size(done)} | ETA: {eta_str}", end="", flush=True)
+                if not item_id:
+                    print(f"\rProgress: {progress:.2f}% | Speed: {speed:.2f} MB/s | Peers: {peers} | Done: {format_size(done)} | ETA: {eta_str}", end="", flush=True)
                 last_print = time.time()
-                
-                # Write to queue file
-                if item_idx != -1:
-                    q_data = load_queue()
-                    if item_idx < len(q_data['queue']):
-                        q_data['queue'][item_idx]['progress'] = progress
-                        q_data['queue'][item_idx]['speed_mb'] = speed
-                        q_data['queue'][item_idx]['peers'] = peers
-                        q_data['queue'][item_idx]['eta'] = eta_str
-                        save_queue(q_data)
+                log_status(item_id, "Downloading", progress=progress, speed=speed, peers=peers, eta=eta_str)
                         
             if s.state == lt.torrent_status.seeding or progress >= 100.0:
-                print("\n\033[1;32m[+] Download finished!\033[0m")
+                if not item_id:
+                    print("\n\033[1;32m[+] Download finished!\033[0m")
+                log_status(item_id, "Finished", progress=100.0, speed=0.0, eta="0s")
                 break
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\n\033[1;31m[!] Download paused/cancelled.\033[0m")
-        if item_idx != -1:
-            q_data = load_queue()
-            if item_idx < len(q_data['queue']):
-                q_data['queue'][item_idx]['status'] = 'queued'
-                save_queue(q_data)
+        if not item_id:
+            print("\n\033[1;31m[!] Download paused/cancelled.\033[0m")
+        log_status(item_id, "Cancelled")
         ses.remove_torrent(handle)
         return False
         
@@ -418,8 +443,12 @@ def download_torrent(info_hash, torrent_name, target_dir, staging_dir, item_idx=
     ses.remove_torrent(handle)
     return True
 
-def post_process_files(staging_dir, dest_dir, is_movie=False):
-    print(f"\n\033[1;34m[*] Sorting and renaming files to {dest_dir}...\033[0m")
+def post_process_files(staging_dir, dest_dir, is_movie=False, item_id=None):
+    if not item_id:
+        print(f"\n\033[1;34m[*] Sorting and renaming files to {dest_dir}...\033[0m")
+    else:
+        log_status(item_id, "Organizing files")
+        
     os.makedirs(dest_dir, exist_ok=True)
     video_extensions = ['.mp4', '.mkv', '.avi', '.m4v', '.mov']
     pattern = re.compile(r'S(\d{2})E(\d{2})', re.IGNORECASE)
@@ -446,7 +475,8 @@ def post_process_files(staging_dir, dest_dir, is_movie=False):
                     else:
                         dest_path = os.path.join(dest_dir, file)
                         
-                print(f"  -> Moving: '{file}' to '{os.path.basename(dest_path)}'")
+                if not item_id:
+                    print(f"  -> Moving: '{file}' to '{os.path.basename(dest_path)}'")
                 if os.path.exists(dest_path):
                     try: os.remove(dest_path)
                     except: pass
@@ -454,14 +484,16 @@ def post_process_files(staging_dir, dest_dir, is_movie=False):
                     shutil.move(src_path, dest_path)
                     renamed += 1
                 except Exception as e:
-                    print(f"  [!] Error moving file: {e}")
+                    if not item_id:
+                        print(f"  [!] Error moving file: {e}")
                     
     # Clean staging
     try:
         shutil.rmtree(staging_dir)
     except:
         pass
-    print(f"\033[1;32m[+] Finished organizing {renamed} files.\033[0m")
+    if not item_id:
+        print(f"\033[1;32m[+] Finished organizing {renamed} files.\033[0m")
 
 def prompt_output_path():
     print(f"\n\033[1;35m[?] Where would you like to save the files?\033[0m")
@@ -688,50 +720,133 @@ def process_queue_loop():
     if not acquire_lock():
         return
         
+    global_progress.clear()
+    global_results.clear()
+    active_threads = {} # item_id -> threading.Thread
+    last_lines_printed = 0
+    
     try:
         while True:
+            # 1. Clean up finished threads and update queue status
             q_data = load_queue()
-            active_item = None
-            active_idx = -1
+            queue_list = q_data.get('queue', [])
             
-            for idx, item in enumerate(q_data.get('queue', [])):
-                if item['status'] in ['queued', 'downloading']:
-                    active_item = item
-                    active_idx = idx
-                    break
-                    
-            if not active_item:
+            finished_ids = []
+            for item_id, thread in active_threads.items():
+                if not thread.is_alive():
+                    finished_ids.append(item_id)
+                    success = global_results.get(item_id, False)
+                    for item in queue_list:
+                        if item['id'] == item_id:
+                            item['status'] = 'completed' if success else 'failed'
+                            break
+                            
+            if finished_ids:
+                q_data['queue'] = queue_list
+                save_queue(q_data)
+                for item_id in finished_ids:
+                    del active_threads[item_id]
+                    if item_id in global_progress:
+                        del global_progress[item_id]
+                    if item_id in global_results:
+                        del global_results[item_id]
+            
+            # 2. Start new downloads in parallel
+            q_data = load_queue()
+            queue_list = q_data.get('queue', [])
+            active_count = len(active_threads)
+            
+            if active_count < MAX_PARALLEL_DOWNLOADS:
+                for item in queue_list:
+                    if (item['status'] == 'queued' or item['status'] == 'downloading') and item['id'] not in active_threads:
+                        item['status'] = 'downloading'
+                        item_id = item['id']
+                        
+                        t = threading.Thread(target=download_queue_item_thread, args=(item,), daemon=True)
+                        active_threads[item_id] = t
+                        t.start()
+                        
+                        active_count += 1
+                        if active_count >= MAX_PARALLEL_DOWNLOADS:
+                            break
+                q_data['queue'] = queue_list
+                save_queue(q_data)
+                
+            # 3. Check if completed
+            has_queued = any(item['status'] in ['queued', 'downloading'] for item in queue_list)
+            if not active_threads and not has_queued:
                 break
                 
-            success = download_queue_item(active_item, active_idx)
+            # 4. Refresh display
+            if last_lines_printed > 0:
+                sys.stdout.write(f"\033[F\033[K" * last_lines_printed)
+                sys.stdout.flush()
+                
+            status_lines = []
+            status_lines.append(f"\033[1;35m--- Parallel Download Engine (v{VERSION}) ---\033[0m")
+            status_lines.append("\033[1;30m" + "=" * 55 + "\033[0m")
             
-            # Update status
-            q_data = load_queue()
-            if active_idx < len(q_data['queue']):
-                q_data['queue'][active_idx]['status'] = 'completed' if success else 'failed'
-                save_queue(q_data)
+            for item in queue_list:
+                status = item.get('status', 'queued')
+                title = item.get('title', 'Unknown')
+                item_id = item['id']
+                
+                status_colors = {
+                    'queued': '\033[1;33m[Queued]\033[0m',
+                    'downloading': '\033[1;32m[Downloading]\033[0m',
+                    'completed': '\033[1;30m[Completed]\033[0m',
+                    'failed': '\033[1;31m[Failed]\033[0m'
+                }
+                status_str = status_colors.get(status, f"[{status}]")
+                
+                if status == 'downloading':
+                    prog_info = global_progress.get(item_id, {})
+                    progress = prog_info.get('progress', 0.0)
+                    speed = prog_info.get('speed_mb', 0.0)
+                    peers = prog_info.get('peers', 0)
+                    eta = prog_info.get('eta', 'Unknown')
+                    status_msg = prog_info.get('status_msg', 'Downloading')
+                    
+                    status_lines.append(f"  \033[1;36m•\033[0m {title} - {status_str} (\033[1;33m{status_msg}\033[0m)")
+                    status_lines.append(f"    Progress: {progress:.2f}% | Speed: {speed:.2f} MB/s | Peers: {peers} | ETA: {eta}")
+                elif status == 'queued':
+                    status_lines.append(f"  \033[1;36m•\033[0m {title} - {status_str}")
+                    
+            status_lines.append("\033[1;30m" + "=" * 55 + "\033[0m")
+            
+            for line in status_lines:
+                print(line)
+            last_lines_printed = len(status_lines)
+            
+            time.sleep(1.5)
+            
+    except KeyboardInterrupt:
+        if last_lines_printed > 0:
+            sys.stdout.write("\n")
+        print("\n\033[1;31m[!] Parallel downloader paused/cancelled by user.\033[0m")
+        q_data = load_queue()
+        for item in q_data.get('queue', []):
+            if item['status'] == 'downloading':
+                item['status'] = 'queued'
+        save_queue(q_data)
     finally:
         release_lock()
 
-def download_queue_item(item, item_idx):
-    q_data = load_queue()
-    if item_idx < len(q_data['queue']):
-        q_data['queue'][item_idx]['status'] = 'downloading'
-        save_queue(q_data)
-        
+def download_queue_item_thread(item):
+    item_id = item['id']
+    global_results[item_id] = False
     dest_dir = item['dest_dir']
     is_movie = item.get('is_movie', False)
     
     episodes = item.get('episodes', [])
     if episodes:
-        print(f"\n\033[1;34m[*] Processing show: {item['title']} ({len(episodes)} episodes sequentially)\033[0m")
+        log_status(item_id, f"Processing show (0/{len(episodes)} episodes)")
         all_success = True
         
         for idx, ep in enumerate(episodes, 1):
             ep_season = ep['season']
             ep_num = ep['number']
             
-            # Self healing: check if episode file already exists
             already_done = False
             for ext in ['.mp4', '.mkv', '.avi', '.m4v', '.mov']:
                 season_folder = f"Season {ep_season:02d}"
@@ -739,32 +854,40 @@ def download_queue_item(item, item_idx):
                     already_done = True
                     break
             if already_done:
-                print(f"  -> Episode S{ep_season:02d}E{ep_num:02d} already completed. Skipping.")
                 continue
                 
-            print(f"\n\033[1;34m[*] [{idx}/{len(episodes)}] Searching for S{ep_season:02d}E{ep_num:02d}...\033[0m")
+            log_status(item_id, f"Searching S{ep_season:02d}E{ep_num:02d}")
             ep_torrent = search_engine.find_best_episode_torrent(item['title'], ep_season, ep_num, imdb_id=item.get('imdb_id'))
             
             if ep_torrent:
                 staging_ep = os.path.join(item['dest_workspace'], f"staging_temp_ep_{ep_season:02d}_{ep_num:02d}")
-                success = download_torrent(ep_torrent['info_hash'], ep_torrent['name'], dest_dir, staging_ep, item_idx=item_idx)
+                log_status(item_id, f"Downloading S{ep_season:02d}E{ep_num:02d}")
+                success = download_torrent(ep_torrent['info_hash'], ep_torrent['name'], dest_dir, staging_ep, item_id=item_id)
                 if success:
-                    post_process_files(staging_ep, dest_dir, is_movie=False)
+                    log_status(item_id, f"Organizing S{ep_season:02d}E{ep_num:02d}")
+                    post_process_files(staging_ep, dest_dir, is_movie=False, item_id=item_id)
+                    log_status(item_id, f"Finished S{ep_season:02d}E{ep_num:02d} ({idx}/{len(episodes)} episodes)")
                 else:
                     all_success = False
             else:
-                print(f"\033[1;31m[!] Episode S{ep_season:02d}E{ep_num:02d} not found on trackers.\033[0m")
                 all_success = False
+                
+        global_results[item_id] = all_success
         return all_success
         
     else:
         info_hash = item['info_hash']
         torrent_name = item['torrent_name']
         staging_dir = item['staging_dir']
-        success = download_torrent(info_hash, torrent_name, dest_dir, staging_dir, item_idx=item_idx)
+        log_status(item_id, "Connecting to peers")
+        success = download_torrent(info_hash, torrent_name, dest_dir, staging_dir, item_id=item_id)
         if success:
-            post_process_files(staging_dir, dest_dir, is_movie=is_movie)
+            log_status(item_id, "Organizing files")
+            post_process_files(staging_dir, dest_dir, is_movie=is_movie, item_id=item_id)
+            log_status(item_id, "Finished")
+        global_results[item_id] = success
         return success
+
 
 class ProgressFileWrapper:
     def __init__(self, filepath, callback):
