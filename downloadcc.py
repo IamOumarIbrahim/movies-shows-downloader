@@ -23,7 +23,7 @@ WORKSPACE_DIR = r"d:\Downloads\Videos"
 if not os.path.exists(WORKSPACE_DIR):
     WORKSPACE_DIR = os.path.join(os.path.expanduser('~'), 'Downloads')
 
-VERSION = "1.1"
+VERSION = "2.0"
 
 def format_size(bytes_val):
     if bytes_val < 1024:
