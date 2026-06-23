@@ -8,6 +8,7 @@ import urllib.parse
 import json
 import tempfile
 import libtorrent as lt
+import requests
 import search_engine
 
 # Enable Windows Console Virtual Terminal Processing for ANSI colors
@@ -22,7 +23,7 @@ WORKSPACE_DIR = r"d:\Downloads\Videos"
 if not os.path.exists(WORKSPACE_DIR):
     WORKSPACE_DIR = os.path.join(os.path.expanduser('~'), 'Downloads')
 
-VERSION = "2.3"
+VERSION = "3.0"
 
 # Queue Paths
 QUEUE_DIR = os.path.join(os.path.expanduser('~'), '.downloadcc')
@@ -188,6 +189,19 @@ def search_season_pack(show_title, season_num=None, max_season=None):
         results = search_engine.query_api(url)
         if not results or not isinstance(results, list) or (len(results) == 1 and results[0].get('id') == '0'):
             results = search_engine.search_via_proxies(q)
+        
+        # Fallback to SolidTorrents if results are empty or low
+        if not results or len(results) < 3:
+            try:
+                solid_res = search_engine.search_solidtorrents(q)
+                if solid_res:
+                    if not results or (len(results) == 1 and results[0].get('id') == '0'):
+                        results = solid_res
+                    else:
+                        results.extend(solid_res)
+            except Exception as e:
+                print(f"SolidTorrents fallback failed: {e}")
+                
         if results and isinstance(results, list):
             all_results.extend(results)
             
@@ -410,8 +424,11 @@ def post_process_files(staging_dir, dest_dir, is_movie=False):
                     if match:
                         s = int(match.group(1))
                         e = int(match.group(2))
+                        season_folder_name = f"Season {s:02d}"
+                        season_dir = os.path.join(dest_dir, season_folder_name)
+                        os.makedirs(season_dir, exist_ok=True)
                         new_filename = f"S_{s:02d}_E_{e:02d}{ext}"
-                        dest_path = os.path.join(dest_dir, new_filename)
+                        dest_path = os.path.join(season_dir, new_filename)
                     else:
                         dest_path = os.path.join(dest_dir, file)
                         
@@ -608,10 +625,7 @@ def add_item_to_queue(query):
         print(f"\033[1;34m[*] Searching for season/series pack on APIBay...\033[0m")
         torrent_pack = search_season_pack(show_title, target_season, max_season=new_item["max_season"])
         
-        show_folder_name = show_title
-        if target_season is not None:
-            show_folder_name = f"{show_title} - Season {target_season:02d}"
-        show_folder_name = re.sub(r'[\\/*?:"<>|]', "", show_folder_name)
+        show_folder_name = re.sub(r'[\\/*?:"<>|]', "", show_title)
         
         dest_dir = os.path.join(dest_workspace, show_folder_name)
         new_item["dest_dir"] = dest_dir
@@ -706,7 +720,8 @@ def download_queue_item(item, item_idx):
             # Self healing: check if episode file already exists
             already_done = False
             for ext in ['.mp4', '.mkv', '.avi', '.m4v', '.mov']:
-                if os.path.exists(os.path.join(dest_dir, f"S_{ep_season:02d}_E_{ep_num:02d}{ext}")):
+                season_folder = f"Season {ep_season:02d}"
+                if os.path.exists(os.path.join(dest_dir, season_folder, f"S_{ep_season:02d}_E_{ep_num:02d}{ext}")):
                     already_done = True
                     break
             if already_done:
@@ -737,6 +752,164 @@ def download_queue_item(item, item_idx):
             post_process_files(staging_dir, dest_dir, is_movie=is_movie)
         return success
 
+class ProgressFileWrapper:
+    def __init__(self, filepath, callback):
+        self.file = open(filepath, 'rb')
+        self.total_size = os.path.getsize(filepath)
+        self.callback = callback
+        self.bytes_read = 0
+
+    def read(self, size=-1):
+        data = self.file.read(size)
+        self.bytes_read += len(data)
+        self.callback(self.bytes_read, self.total_size)
+        return data
+
+    def seek(self, offset, whence=0):
+        self.file.seek(offset, whence)
+        if offset == 0 and whence == 0:
+            self.bytes_read = 0
+
+    def tell(self):
+        return self.file.tell()
+
+    def __len__(self):
+        return self.total_size
+
+    def close(self):
+        self.file.close()
+
+def load_config():
+    init_queue_dir()
+    config_path = os.path.join(QUEUE_DIR, 'config.json')
+    if not os.path.exists(config_path):
+        return {}
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_config(config):
+    init_queue_dir()
+    config_path = os.path.join(QUEUE_DIR, 'config.json')
+    try:
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        print(f"Error saving config: {e}")
+
+def get_upload_target(target_name=None):
+    if target_name:
+        if os.path.exists(target_name):
+            return target_name
+        workspace_path = os.path.join(WORKSPACE_DIR, target_name)
+        if os.path.exists(workspace_path):
+            return workspace_path
+        cwd_path = os.path.abspath(target_name)
+        if os.path.exists(cwd_path):
+            return cwd_path
+        print(f"\033[1;31mError: Target '{target_name}' not found.\033[0m")
+        return None
+        
+    if not os.path.exists(WORKSPACE_DIR):
+        print(f"\033[1;31mError: Workspace directory '{WORKSPACE_DIR}' does not exist.\033[0m")
+        return None
+        
+    options = []
+    for name in os.listdir(WORKSPACE_DIR):
+        full_path = os.path.join(WORKSPACE_DIR, name)
+        is_dir = os.path.isdir(full_path)
+        label = f"[Dir] {name}" if is_dir else f"[File] {name} ({format_size(os.path.getsize(full_path))})"
+        options.append({'label': label, 'path': full_path, 'name': name})
+        
+    if not options:
+        print("\033[1;33mNo folders or files found in workspace to upload.\033[0m")
+        return None
+        
+    selection = interactive_select(options, "Select Folder/File to Upload to VLC")
+    if selection:
+        return selection['path']
+    return None
+
+def run_vlc_upload(target_name=None):
+    config = load_config()
+    last_vlc_ip = config.get('last_vlc_ip', '')
+    
+    print(f"\n\033[1;35m--- VLC WiFi Sharing Uploader ---\033[0m")
+    prompt_str = f"Enter the VLC WiFi Sharing URL/IP [{last_vlc_ip}]: " if last_vlc_ip else "Enter the VLC WiFi Sharing URL/IP (e.g. 192.168.1.100:8080): "
+    vlc_ip = input(prompt_str).strip()
+    if not vlc_ip:
+        vlc_ip = last_vlc_ip
+        
+    if not vlc_ip:
+        print("\033[1;31mError: No VLC WiFi Sharing URL/IP specified.\033[0m")
+        return
+        
+    if not vlc_ip.startswith('http://') and not vlc_ip.startswith('https://'):
+        vlc_ip = "http://" + vlc_ip
+        
+    config['last_vlc_ip'] = vlc_ip
+    save_config(config)
+    
+    upload_target = get_upload_target(target_name)
+    if not upload_target:
+        return
+        
+    video_extensions = ['.mp4', '.mkv', '.avi', '.m4v', '.mov']
+    files_to_upload = []
+    if os.path.isdir(upload_target):
+        for root, dirs, files in os.walk(upload_target):
+            for file in files:
+                ext = os.path.splitext(file)[1].lower()
+                if ext in video_extensions:
+                    files_to_upload.append(os.path.join(root, file))
+    else:
+        ext = os.path.splitext(upload_target)[1].lower()
+        if ext in video_extensions:
+            files_to_upload.append(upload_target)
+            
+    if not files_to_upload:
+        print("\033[1;31mNo compatible video files found to upload.\033[0m")
+        return
+        
+    upload_url = f"{vlc_ip.rstrip('/')}/upload"
+    print(f"\033[1;34m[*] Connecting to VLC at {vlc_ip}...\033[0m")
+    try:
+        r = requests.get(vlc_ip, timeout=5)
+        if r.status_code != 200:
+            print(f"\033[1;31m[!] Warning: VLC returned status code {r.status_code}. Attempting upload anyway...\033[0m")
+    except Exception as e:
+        print(f"\033[1;31m[!] Error connecting to {vlc_ip}: {e}\033[0m")
+        print("\033[1;31mMake sure VLC is open on your iPad and WiFi Sharing is enabled!\033[0m")
+        return
+        
+    print(f"\n\033[1;34m[*] Uploading {len(files_to_upload)} files...\033[0m")
+    for idx, filepath in enumerate(files_to_upload, 1):
+        filename = os.path.basename(filepath)
+        print(f"\n\033[1;36m[{idx}/{len(files_to_upload)}] {filename} ({format_size(os.path.getsize(filepath))})\033[0m")
+        
+        def progress_callback(bytes_read, total_size):
+            progress = (bytes_read / total_size) * 100 if total_size > 0 else 0
+            bar_len = 30
+            filled_len = int(bar_len * bytes_read // total_size) if total_size > 0 else 0
+            bar = '=' * filled_len + '-' * (bar_len - filled_len)
+            print(f"\rUpload Progress: [{bar}] {progress:.1f}% | {format_size(bytes_read)}/{format_size(total_size)}", end="", flush=True)
+            
+        try:
+            wrapped_file = ProgressFileWrapper(filepath, progress_callback)
+            response = requests.post(upload_url, files={'file': (filename, wrapped_file, 'video/mp4')}, timeout=600)
+            wrapped_file.close()
+            
+            if response.status_code in [200, 201, 204]:
+                print(f"\n\033[1;32m[+] Successfully uploaded: {filename}\033[0m")
+            else:
+                print(f"\n\033[1;31m[!] Failed to upload {filename}. Status: {response.status_code}\033[0m")
+        except Exception as e:
+            print(f"\n\033[1;31m[!] Upload error for {filename}: {e}\033[0m")
+            
+    print(f"\n\033[1;32m[+] All uploads completed!\033[0m")
+
 def main():
     init_queue_dir()
     
@@ -764,6 +937,10 @@ def main():
                 return
             query = " ".join(args[1:])
             add_item_to_queue(query)
+            return
+        elif cmd == 'vlc':
+            target_name = " ".join(args[1:]) if len(args) > 1 else None
+            run_vlc_upload(target_name)
             return
             
     # Default behavior: run search and interactive selection

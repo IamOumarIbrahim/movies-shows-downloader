@@ -162,6 +162,69 @@ def get_show_episodes(show_id):
         })
     return episodes
 
+def search_solidtorrents(query):
+    url = f"https://solidtorrents.net/api/v1/search?q={urllib.parse.quote(query)}&sort=seeders&category=video"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    data = query_api(url, headers=headers)
+    if not data or 'results' not in data:
+        return []
+    
+    results = []
+    for item in data['results']:
+        magnet = item.get('magnet', '')
+        hash_match = re.search(r'urn:btih:([a-fA-F0-9]{40})', magnet)
+        if not hash_match:
+            continue
+        info_hash = hash_match.group(1).lower()
+        
+        name = item.get('title', '')
+        name_lower = name.lower()
+        
+        is_tv = any(kw in name_lower for kw in ['s0', 's1', 's2', 's3', 'season', 'episode', 'complete series'])
+        cat_id = '208' if is_tv else '207'
+        
+        results.append({
+            'id': info_hash,
+            'name': f"{name} [SOLID]",
+            'info_hash': info_hash,
+            'size': item.get('size', 0),
+            'seeders': item.get('swarm', {}).get('seeders', 0),
+            'leechers': item.get('swarm', {}).get('leechers', 0),
+            'category': cat_id
+        })
+    return results
+
+def search_yts(query):
+    url = f"https://yts.mx/api/v2/list_movies.json?query_term={urllib.parse.quote(query)}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    data = query_api(url, headers=headers)
+    if not data or data.get('status') != 'ok' or 'data' not in data or 'movies' not in data['data']:
+        return []
+        
+    results = []
+    for movie in data['data']['movies']:
+        title = movie.get('title', 'Unknown Movie')
+        year = movie.get('year', '')
+        torrents = movie.get('torrents', [])
+        for t in torrents:
+            info_hash = t.get('hash', '').lower()
+            quality = t.get('quality', '1080p')
+            t_type = t.get('type', 'web')
+            size_bytes = t.get('size_bytes', 0)
+            seeders = t.get('seeds', 0)
+            leechers = t.get('peers', 0)
+            
+            results.append({
+                'id': info_hash,
+                'name': f"{title} ({year}) [{quality}] [{t_type.upper()}] [YTS]",
+                'info_hash': info_hash,
+                'size': size_bytes,
+                'seeders': seeders,
+                'leechers': leechers,
+                'category': '207'
+            })
+    return results
+
 def search_movies(query):
     """
     Search for movies on apibay.org (The Pirate Bay API)
@@ -173,6 +236,31 @@ def search_movies(query):
         print("APIBay search failed or empty, trying fallback proxies...")
         results = search_via_proxies(query)
         
+    # Fallback to YTS & SolidTorrents if results are empty or low
+    if not results or not isinstance(results, list) or len(results) < 3 or (len(results) == 1 and results[0].get('id') == '0'):
+        print("Low results on APIBay, querying YTS and SolidTorrents fallbacks...")
+        fallback_results = []
+        
+        try:
+            yts_res = search_yts(query)
+            if yts_res:
+                fallback_results.extend(yts_res)
+        except Exception as e:
+            print(f"YTS fallback failed: {e}")
+            
+        try:
+            solid_res = search_solidtorrents(query)
+            if solid_res:
+                fallback_results.extend(solid_res)
+        except Exception as e:
+            print(f"SolidTorrents fallback failed: {e}")
+            
+        if fallback_results:
+            if not results or (len(results) == 1 and results[0].get('id') == '0'):
+                results = fallback_results
+            else:
+                results.extend(fallback_results)
+                
     if not results or not isinstance(results, list) or (len(results) == 1 and results[0].get('id') == '0'):
         return []
         
@@ -262,6 +350,19 @@ def find_best_episode_torrent(show_name, season, episode, all_candidates=False, 
         if not results or not isinstance(results, list) or (len(results) == 1 and results[0].get('id') == '0'):
             print("APIBay episode query failed or empty, trying fallback proxies...")
             results = search_via_proxies(query)
+            
+        # Fallback to SolidTorrents if results are empty or low
+        if not results or not isinstance(results, list) or len(results) < 3 or (len(results) == 1 and results[0].get('id') == '0'):
+            print("Low results on APIBay, trying SolidTorrents fallback...")
+            try:
+                solid_res = search_solidtorrents(query)
+                if solid_res:
+                    if not results or (len(results) == 1 and results[0].get('id') == '0'):
+                        results = solid_res
+                    else:
+                        results.extend(solid_res)
+            except Exception as e:
+                print(f"SolidTorrents fallback failed: {e}")
             
         if results and isinstance(results, list) and not (len(results) == 1 and results[0].get('id') == '0'):
             # Pattern to match current season and episode

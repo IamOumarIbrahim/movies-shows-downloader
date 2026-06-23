@@ -89,6 +89,7 @@ You can run `downloadcc` globally from any terminal session.
   - **`downloadcc add "Name"`**: Searches, selects, and appends a new item directly to the queue. If the downloader is idle, it starts downloading immediately. If it's busy, it queues it to start automatically once current downloads finish.
   - **`downloadcc remove <number>`**: Removes a pending item from the queue list by its queue index number.
   - **`downloadcc clear`**: Clears all pending items from the queue.
+  - **`downloadcc vlc ["Folder or File"]`**: Launches the wireless uploader to push downloaded files directly to the VLC app on your iPad. If the folder/file is not specified, it lets you select from your workspace folders. Displays real-time progress bars for uploads.
 
 ---
 
@@ -127,8 +128,9 @@ pyinstaller --noconfirm --onefile --console --name downloadcc downloadcc.py
 ## 📱 Transferring and Watching on iPad
 
 1. **Transfer to iPad**:
-   - Put the downloaded folders into your iCloud Drive/Google Drive on your PC. They will sync and appear in your iPad's **Files** app.
-   - Or connect your iPad via USB and copy them directly inside the **VLC** files directory.
+   - **Wireless (VLC Command Line Upload)**: Open VLC on your iPad, enable **Sharing via WiFi**, and run `downloadcc vlc` (or `downloadcc vlc "Show Name"`) in your command prompt. It will upload files wirelessly with active progress bars.
+   - **Cloud Storage**: Copy files to iCloud Drive / Google Drive on PC, then access them via the iPad's **Files** app.
+   - **USB Transfer**: Connect iPad via USB and transfer files using the Apple Devices app or iTunes directly into the VLC documents folder.
 2. **Watch**:
    - Open **VLC on iPad** (free on App Store). VLC natively supports all audio codecs (including AC3/DTS) and plays these files seamlessly!
 
